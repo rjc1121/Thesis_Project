@@ -1,0 +1,189 @@
+---
+title: "Genome Wide Associaton Studies on Aβ42:Aβ40 Ratio Biomarker"
+author: "Ryan J. Clark"
+date: "2024-12-10"
+output: html_document
+---
+
+# Introduction 
+
+## Rationale 
+
+Individuals with Down syndrome are at an increased risk for Alzheimer's disease. This is primarily due to the gene APP being present on chromosome 21. This gene encodes the amyloid precursor protein, which when broken down, turns into Aβ. Some isoforms of Aβ are associated with Alzheimer's disease. Since individuals with Dwn syndrome have an extra copy of chromosome 21, APP is overexpressed, causing Alzheimer's pathology to appear much earlier in these individuals. 
+
+## Objective 
+
+Genome wide association studies look at variants across the genome to determine association between a genotype and a trait. Eight different biomarkers commonly associated with Down syndrome were used as outcome variables to determine if there were significant variants. In this project I will go over the work flow for one of the eight biomarkers. This biomarker Aβ42 to Aβ40 is a ratio of the two main isoforms of the Aβ protein that is inversely associated with Alzheimer's disease. 
+
+# Importing Data 
+The genotype data for all of the chromosomes besides chromosome 21 were handled separately in a binary plink file which is a filetype for storing genomic information. This file was processed with a bash script with UNIX. Chromosome 21 variants were made available separately in a text file since plink cannot work with trisomy data. The phenotype and participant information were stored in a text file.  
+```{r}
+
+
+Phenotype <- read.delim("Phenotype.txt")
+
+CHR21 <- read.delim("CHR21.txt", sep = "")
+```
+
+## CHR21 Quality Control 
+Missingness for samples and variants are common quality control criteria for this type of data. I am calculating missingness for samples and for variants. I am removing variants and samples with more than 5% missingness. 6,518 of the original 9,792 variants remained. 425 of 429 original samples remained. 
+```{r}
+library(tidyverse)
+
+#Calculating missingness for variants 
+Variant_Missingness <- rowMeans(is.na(CHR21))
+
+CHR_21_Filtered <- CHR21 %>% 
+  filter(Variant_Missingness < 0.05)
+
+#Partipant columns are in columns 8 through 429 
+Participant_Columns <- 8:429
+
+Sample_Missingness <- CHR_21_Filtered %>%  
+  select(all_of(Participant_Columns)) %>% 
+  map_dbl(~ sum(is.na(.)) / nrow(CHR_21_Filtered))
+
+Failing_Samples <- names(Sample_Missingness[Sample_Missingness > 0.05])
+
+CHR_21_Filtered_2 <- CHR_21_Filtered %>% 
+  select(-all_of(Failing_Samples))
+
+
+```
+
+
+
+## Phenotype Quality Control 
+Since the vast majority of the cohort was white, only these white individuals were included due to differences in minor allele frequencies. Siblings of individuals with Down sydrome were included as controls. THis is not a case-control study so these controls were removed. 375 of 438 individuals passed. 
+```{r}
+Phenotype_White <- Phenotype %>% 
+  filter(Race == "White")
+
+Phenotype_Filtered <- Phenotype_White %>% 
+  filter(DS_Cases_Control==1)
+```
+
+
+
+## Covariates 
+For covariates to be used in the model, you to see uniform distribution so that the data is representative of the population. 
+
+```{r}
+ggplot(Phenotype_Filtered, aes(x = age_at_visit)) + 
+  geom_histogram(fill = "darkgreen", binwidth = 3)
+
+ggplot(Phenotype_Filtered, aes(x = Gender, fill = Gender)) + 
+  geom_bar(width = 0.5, stat = "count") +
+  geom_text(aes(label = ..count..), stat = "count", vjust = 2)+
+  scale_fill_manual(values = c("Female" = "gold", "Male" = "royalblue"))
+```
+
+## Biomarker Normalization 
+Normality is a statistical assumption of outcome variables in regression models. The biomarker data ws not normally distributed. Since biomarkers were used as the outcome variable in the regression model, I used rank based inverse normal transformation to normalize the biomarker. 
+```{r}
+library(ggplot2)
+#Defining normalization function 
+inverse.normalize <- function(i) { 
+  
+  stopifnot(is.vector(i, mode = "numeric")) 
+  
+  qnorm((rank(i, 
+              na.last = "keep", 
+              ties.method = "random" 
+  ) - 0.5) / sum(!is.na(i))) 
+  
+} 
+
+Phenotype_Filtered$inv_Ab42_40_Ratio <- inverse.normalize(Phenotype_Filtered$Ab42_40_Ratio)
+
+#Making a histogram of both 
+
+ggplot(Phenotype_Filtered) +
+  geom_histogram(aes(x = Ab42_40_Ratio), fill = "blue", alpha = 0.5, bins = 30) +
+  geom_histogram(aes(x = inv_Ab42_40_Ratio), fill = "red", alpha = 0.5, bins = 30) + 
+  labs(title = "Ab42:40 Ratio Biomarker Before and After Normalization")
+```
+
+# CHR21 Linear Model 
+A linear model was used for both the chromosome 21 data with Matrix eQTL, and the rest of the autosome data from plink. 
+
+Matrix eQTL invovled converting the biomarker, variant, and covariate data into separate matrices in order to test for association. Plink can accomplish this with a small UNIX script. 
+
+
+
+## Linear Model: Biomarker ~ Variant + Age + Sex + PCs 1:4
+
+# Merging Data from the two models 
+
+```{r}
+library(tidyverse)
+library(qqman)
+
+
+
+#Reading in CHR21 and autosome results
+ABCDS_Ab42_40_Ratio.assoc <- read.table("~/Documents/Thesis_Data/ABCDS_inv_Ab42_40_Ratio.assoc.frq", header=TRUE, quote="", comment.char="")
+
+MEQTL_Results_Ab42_40_Ratio <- read.delim("~/Documents/Thesis_Data/MEQTL_Results_inv_Ab42_40_Ratio", quote="")
+
+#Using regular expressions to make CHR and BP columns from SNP naming
+MEQTL_Results_Ab42_40_Ratio$CHR <- sub(":.*", "", MEQTL_Results_Ab42_40_Ratio$SNP)
+
+MEQTL_Results_Ab42_40_Ratio$BP <- sub(".*:(\\d+)\\[.*", "\\1", MEQTL_Results_Ab42_40_Ratio$SNP)  
+
+#reordering columns to match autosomes, making columns match. 
+
+MEQTL_Results_Ab42_40_Ratio <- MEQTL_Results_Ab42_40_Ratio %>% select(CHR, BP, everything())
+
+MEQTL_Results_Ab42_40_Ratio <- MEQTL_Results_Ab42_40_Ratio %>% rename(P = p.value)
+
+MEQTL_Results_Ab42_40_Ratio <- MEQTL_Results_Ab42_40_Ratio %>% select(CHR,BP,SNP,P)
+
+ABCDS_Ab42_40_Ratio.assoc <- ABCDS_Ab42_40_Ratio.assoc %>% select(CHR,BP,SNP,P)
+
+MEQTL_Results_Ab42_40_Ratio$CHR <- as.numeric(MEQTL_Results_Ab42_40_Ratio$CHR)
+
+MEQTL_Results_Ab42_40_Ratio$BP <- as.numeric(MEQTL_Results_Ab42_40_Ratio$BP)
+
+Ab42_40_Ratio_Complete <- bind_rows(MEQTL_Results_Ab42_40_Ratio, ABCDS_Ab42_40_Ratio.assoc)
+
+Ab42_40_Ratio_Complete <- Ab42_40_Ratio_Complete %>% arrange(CHR,BP)
+
+#This is for the qqplot 
+qq(Ab42_40_Ratio_Complete$P, main= "Ab42_40_Ratio") 
+
+#Removed p-values that do not add anything to the plot for quicker plotting.
+Ab42_40_Ratio_Complete <- Ab42_40_Ratio_Complete %>% 
+  filter(-log10(P)>1)
+
+manhattan(Ab42_40_Ratio_Complete, chr="CHR", bp="BP", snp="SNP", p="P", main= "Ab42_40_Ratio", annotatePval = 5e-8)
+
+
+```
+
+
+# Post GWAS Analysis 
+Since we have a significant variant genome wide (5e-8), we can look at that region via a locuszoom plot. 
+
+```{r}
+library(knitr)
+include_graphics("AB4240_LZ.png")
+```
+AC018685.2 is a non-protein coding gene. Further examination with with a gene expression database (GTEx) shows that this gene is primarily expressed in the brain. The closest protein coding gene is MYT1L in which mutations have previously been linked with cognitive disabilities. 
+
+
+# Conclusions 
+
+1.) Working with trisomy data was a unique challenge for this analysis. 
+
+2.) Finding genome wide significance with a smaller sample size (375) was exciting.
+
+3.) Removing other races may increase statistical power with minor allele frequencies, but limits generizability to the greater population 
+
+4.) This is one of the eight biomarkers I conducted this workflow on.
+
+5.) The nearest protein coding gene was not really close (over 300kbp) so I am skeptical of the influence of the non-protein coding gene from this biomarker. 
+
+
+
+
